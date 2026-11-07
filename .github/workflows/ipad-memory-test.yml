@@ -1,0 +1,106 @@
+name: Test memoria iPad
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Compila e impacchetta le due app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > main.m <<'EOF'
+          #import <UIKit/UIKit.h>
+          #include <os/proc.h>
+
+          @interface AppDelegate : UIResponder <UIApplicationDelegate>
+          @property (strong, nonatomic) UIWindow *window;
+          @end
+
+          @implementation AppDelegate
+          - (BOOL)application:(UIApplication *)application
+              didFinishLaunchingWithOptions:(NSDictionary *)options {
+              UIViewController *screen = [UIViewController new];
+              screen.view.backgroundColor = UIColor.systemBackgroundColor;
+
+              UILabel *label = [UILabel new];
+              label.translatesAutoresizingMaskIntoConstraints = NO;
+              label.numberOfLines = 0;
+              label.textAlignment = NSTextAlignmentCenter;
+              label.text = [NSString stringWithFormat:@"%@\nMemoria disponibile: %.2f GiB",
+                  [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleDisplayName"],
+                  os_proc_available_memory() / 1073741824.0];
+              [screen.view addSubview:label];
+              [NSLayoutConstraint activateConstraints:@[
+                  [label.centerXAnchor constraintEqualToAnchor:screen.view.centerXAnchor],
+                  [label.centerYAnchor constraintEqualToAnchor:screen.view.centerYAnchor]
+              ]];
+
+              self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+              self.window.rootViewController = screen;
+              [self.window makeKeyAndVisible];
+              return YES;
+          }
+          @end
+
+          int main(int argc, char *argv[]) {
+              @autoreleasepool {
+                  return UIApplicationMain(argc, argv, nil, NSStringFromClass(AppDelegate.class));
+              }
+          }
+          EOF
+
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 \
+            -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
+            -fobjc-arc -framework UIKit -framework Foundation main.m -o MemoryTest
+
+          mkdir -p output
+          for mode in base extra; do
+            name="Memoria $mode"
+            app="$mode/Payload/MemoryTest.app"
+            mkdir -p "$app"
+            cp MemoryTest "$app/MemoryTest"
+
+            cat > "$app/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleIdentifier</key><string>com.example.ipadmemorytest.$mode</string>
+            <key>CFBundleExecutable</key><string>MemoryTest</string>
+            <key>CFBundleName</key><string>MemoryTest</string>
+            <key>CFBundleDisplayName</key><string>$name</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>1.0</string>
+            <key>CFBundleVersion</key><string>1</string>
+            <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+            <key>MinimumOSVersion</key><string>16.0</string>
+            <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+            <key>UILaunchScreen</key><dict/>
+          </dict></plist>
+          EOF
+
+            if [[ "$mode" == extra ]]; then
+              cat > memory.plist <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>com.apple.developer.kernel.increased-memory-limit</key><true/>
+          </dict></plist>
+          EOF
+              codesign --force --sign - --entitlements memory.plist "$app"
+            else
+              codesign --force --sign - "$app"
+            fi
+
+            (cd "$mode" && zip -qr "../output/memoria-$mode.ipa" Payload)
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipad-memory-test
+          path: output/*.ipa
+          if-no-files-found: error
